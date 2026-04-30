@@ -1,0 +1,12 @@
+string                       cam_sn
+uint32                       img_type
+uint32                       frame_num
+int64                        time_stamp
+sensor_msgs/CameraInfo       depth_cam_info
+sensor_msgs/CameraInfo       rgb_cam_info
+sensor_msgs/Image            depth_img
+sensor_msgs/Image            rgb_img
+sensor_msgs/Image            left_ir_img
+sensor_msgs/Image            right_ir_img
+---
+std_msgs/Bool                result

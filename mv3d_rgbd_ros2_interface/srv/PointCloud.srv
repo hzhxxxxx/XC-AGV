@@ -1,0 +1,9 @@
+# 请求响应的数据
+string                   cam_sn
+uint32                   pd_type
+uint32                   frame_num
+int64                    time_stamp
+sensor_msgs/PointCloud2  point_cloud
+---
+# 回复响应的数据
+std_msgs/Bool            result

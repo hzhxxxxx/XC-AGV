@@ -1,0 +1,43 @@
+#!/usr/bin/python3
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch_ros.actions import LifecycleNode, Node
+from launch.substitutions import LaunchConfiguration
+from launch.actions import DeclareLaunchArgument, TimerAction
+
+import lifecycle_msgs.msg
+import os
+
+def generate_launch_description():
+
+    driver_dir = os.path.join(get_package_share_directory('lslidar_driver'), 'params', 'lidar_uart_ros2','lsm10_p.yaml')
+                     
+    driver_node = LifecycleNode(package='lslidar_driver',
+                                executable='lslidar_driver_node',
+                                name='lslidar_driver_node',		
+                                output='screen',
+                                emulate_tty=True,
+                                namespace='',
+                                parameters=[driver_dir],
+                                remappings=[('scan', 'scan_raw')],
+                                )
+    
+    # Python Binning节点：固定雷达点数为835
+    binning_node = Node(
+        package='my_robot_bringup',
+        executable='scan_binning_node.py',
+        name='scan_binning_node',
+        output='screen',
+        parameters=[{'num_bins': 836}]
+    )
+    
+    # 延迟3秒启动binning节点，等雷达驱动完全初始化
+    delayed_binning = TimerAction(
+        period=3.0,
+        actions=[binning_node]
+    )
+    
+    return LaunchDescription([
+        driver_node,
+        delayed_binning,
+    ])

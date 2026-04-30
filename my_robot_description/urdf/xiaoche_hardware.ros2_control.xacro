@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <ros2_control name="MobileBase" type="system">
+        <hardware>
+            <!-- 使用实际硬件接口插件 -->
+            <plugin>mobile_base_hardware/MobileBaseHardwareInterface</plugin>
+            <param name="can_interface">can0</param>
+            <param name="node_id">1</param>
+            <param name="accel_time_ms">1000</param>
+            <param name="decel_time_ms">800</param>
+            <param name="torque_slope_ma_s">500</param>
+        </hardware>
+
+        <!-- 左右驱动轮 -->
+        <joint name="base_left_wheel_joint">
+            <command_interface name="velocity"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+        </joint>
+        <joint name="base_right_wheel_joint">
+            <command_interface name="velocity"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+        </joint>
+
+    </ros2_control>
+
+</robot>

@@ -1,0 +1,8 @@
+<launch>
+   <node pkg="mv3d_rgbd_ros2" exec="hik_camera_image_pub" name="hik_camera_image_pub" />
+
+   <node pkg="mv3d_rgbd_ros2" exec="hik_camera_image_sub" name="hik_camera_image_sub" />
+
+   <node pkg="rviz2" exec="rviz2" args="-d $(find-pkg-share mv3d_rgbd_ros2)/config/ShowImage.rviz" />  
+
+</launch>

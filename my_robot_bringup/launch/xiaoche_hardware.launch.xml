@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 小车硬件启动
+
+    启动内容:
+    1. robot_state_publisher（发布机器人模型）
+    2. ros2_control硬件接口（CAN电机控制器）
+    3. joint_state_broadcaster（关节状态广播）
+    4. diff_drive_controller（差速控制器）
+    5. 雷达驱动
+    6. laser_filters（固定雷达点数）
+    7. RViz可视化（可选）
+
+    前置条件:
+    - CAN接口已启用: sudo ip link set can0 up type can bitrate 500000
+    - 用户在dialout组: sudo usermod -a -G dialout sunrise
+    -->
+
+    <!-- 机器人描述 -->
+    <let name="urdf_path"
+         value="$(find-pkg-share my_robot_description)/urdf/xiaoche_hardware.urdf.xacro" />
+
+    <node pkg="robot_state_publisher" exec="robot_state_publisher">
+        <param name="robot_description"
+               value="$(command 'xacro $(var urdf_path)')" />
+    </node>
+
+    <!-- ros2_control硬件接口 - remap cmd_vel_unstamped to cmd_vel -->
+    <node pkg="controller_manager" exec="ros2_control_node">
+        <param from="$(find-pkg-share my_robot_bringup)/config/xiaoche_controllers.yaml" />
+        <param name="robot_description"
+               value="$(command 'xacro $(var urdf_path)')" />
+        <remap from="/diff_drive_controller/cmd_vel_unstamped" to="/cmd_vel" />
+    </node>
+
+    <!-- 启动控制器 -->
+    <node pkg="controller_manager" exec="spawner"
+          args="joint_state_broadcaster" />
+    <node pkg="controller_manager" exec="spawner"
+          args="diff_drive_controller" />
+
+    <!-- 启动雷达 -->
+    <!-- 
+    <node pkg="lslidar_driver" exec="lslidar_driver_node" 
+          name="lslidar_driver_node" output="screen">
+        <param from="$(find-pkg-share lslidar_driver)/params/lidar_uart_ros2/lsm10_p.yaml" />
+    </node>
+    -->
+
+    <!-- RViz可视化（可选） -->
+    
+    <arg name="use_rviz" default="true" />
+    <let name="rviz_config"
+         value="$(find-pkg-share my_robot_bringup)/rviz/nav.rviz" />
+    <node pkg="rviz2" exec="rviz2" output="screen"
+          args="-d $(var rviz_config)" if="$(var use_rviz)" />
+      
+</launch>

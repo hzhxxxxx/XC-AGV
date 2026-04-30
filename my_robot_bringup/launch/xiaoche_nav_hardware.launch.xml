@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 小车实际硬件导航
+
+    启动内容:
+    1. 硬件启动（电机+传感器）
+    2. Nav2导航栈
+    3. 地图服务器（预建地图）
+    -->
+
+    <!-- 步骤1: 启动硬件 -->
+    <include file="$(find-pkg-share my_robot_bringup)/launch/xiaoche_hardware.launch.xml">
+        <arg name="use_rviz" value="false" />  <!-- Nav2会启动RViz -->
+    </include>
+
+    <!-- 步骤2: 启动Nav2 -->
+    <include file="$(find-pkg-share nav2_bringup)/launch/bringup_launch.py">
+        <arg name="use_sim_time" value="false"/>  <!-- 关键：实际硬件时间 -->
+        <arg name="map"
+             value="/home/sunrise/maps/xiaoche_world.yaml"/>
+        <arg name="params_file"
+             value="$(find-pkg-share my_robot_bringup)/config/xiaoche_nav2_params.yaml"/>
+    </include>
+</launch>

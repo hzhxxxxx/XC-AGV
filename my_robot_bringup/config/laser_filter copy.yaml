@@ -1,0 +1,19 @@
+scan_to_scan_filter_chain:
+  ros__parameters:
+    # 过滤器1：矩形区域屏蔽（车身本体）
+    filter1:
+      name: box_filter
+      type: laser_filters/LaserScanBoxFilter
+      params:
+        box_frame: base_link        # 基于机器人底盘坐标系
+        min_x: -0.238601            # 车后边界
+        max_x:  0.228307            # 车前边界
+        min_y: -0.21835             # 车右边界
+        max_y:  0.21835             # 车左边界
+        min_z: -1.0                 # Z轴下限（2D雷达设为较大范围）
+        max_z:  1.0                 # Z轴上限
+        invert: false               # false=屏蔽矩形内部，true=屏蔽矩形外部
+        # 坐标系说明：
+        # +X = 车前方，-X = 车后方
+        # +Y = 车左侧，-Y = 车右侧
+        # 此配置会屏蔽车身范围内的所有雷达点
