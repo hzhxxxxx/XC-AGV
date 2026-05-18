@@ -16,6 +16,7 @@ import rclpy
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from aiohttp import web
 import websockets
 
@@ -298,13 +299,15 @@ def main():
     home = poi_map["home"]
     init_pose = create_pose(home["x"], home["y"], home["theta"])
     init_msg = PoseWithCovarianceStamped()
-    init_msg.header = init_pose.header
+    init_msg.header.frame_id = "map"
+    init_msg.header.stamp = Time().to_msg()
     init_msg.pose.pose = init_pose.pose
 
-    time.sleep(0.5)
+    time.sleep(1.0)
     for _ in range(5):
+        init_msg.header.stamp = Time().to_msg()
         initial_pose_pub.publish(init_msg)
-        time.sleep(0.2)
+        time.sleep(0.3)
     print("[INIT] 已发布初始位姿")
 
     navigator.waitUntilNav2Active()
