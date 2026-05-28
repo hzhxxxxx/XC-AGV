@@ -8,16 +8,22 @@ import asyncio
 import json
 import math
 import os
+import subprocess
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
+import cv2
 import rclpy
+import rclpy.node
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from sensor_msgs.msg import Image
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
+from cv_bridge import CvBridge
 from aiohttp import web
 import websockets
 
@@ -57,6 +63,24 @@ poi_map = {}
 # 手动控制 watchdog
 watchdog_timer = None
 watchdog_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# 相机配置
+# ---------------------------------------------------------------------------
+
+CAPTURE_DIR = "/home/sunrise/claw_image"
+CAPTURE_TTL = 600        # 图片保留时间（秒）
+MAX_CAPTURES = 100       # 最多保留图片数量
+
+latest_rgb = None
+latest_depth = None
+camera_lock = threading.Lock()
+
+image_store = {}         # image_id -> {created_at, rgb_path, has_depth, depth_path}
+image_store_lock = threading.Lock()
+
+bridge = CvBridge()
+camera_node = None
 
 # ---------------------------------------------------------------------------
 # 工具函数
@@ -389,6 +413,216 @@ async def handle_points(request):
 
 
 # ---------------------------------------------------------------------------
+# 相机订阅节点
+# ---------------------------------------------------------------------------
+
+class CameraNode(rclpy.node.Node):
+    def __init__(self):
+        super().__init__("camera_subscriber")
+        self.create_subscription(Image, "/camera/rgb",   self._rgb_cb,   10)
+        self.create_subscription(Image, "/camera/depth", self._depth_cb, 10)
+
+    def _rgb_cb(self, msg):
+        global latest_rgb
+        with camera_lock:
+            latest_rgb = msg
+
+    def _depth_cb(self, msg):
+        global latest_depth
+        with camera_lock:
+            latest_depth = msg
+
+
+# ---------------------------------------------------------------------------
+# 图片清理
+# ---------------------------------------------------------------------------
+
+def _delete_image(image_id: str):
+    meta = image_store.pop(image_id, None)
+    if meta is None:
+        return
+    for key in ("rgb_path", "depth_path"):
+        path = meta.get(key)
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _cleanup_by_count():
+    if len(image_store) > MAX_CAPTURES:
+        oldest = sorted(image_store.keys(), key=lambda k: image_store[k]["created_at"])
+        for iid in oldest[:len(image_store) - MAX_CAPTURES]:
+            _delete_image(iid)
+
+
+def _cleanup_loop():
+    while True:
+        time.sleep(60)
+        now = datetime.now()
+        with image_store_lock:
+            expired = [
+                iid for iid, meta in image_store.items()
+                if (now - datetime.fromisoformat(meta["created_at"])).total_seconds() > CAPTURE_TTL
+            ]
+            for iid in expired:
+                _delete_image(iid)
+                print(f"[CAM] 过期清理: {iid}")
+
+
+# ---------------------------------------------------------------------------
+# 相机处理器
+# ---------------------------------------------------------------------------
+
+async def handle_capture(request):
+    try:
+        body = await request.json() if request.content_length else {}
+    except Exception:
+        body = {}
+
+    include_depth = body.get("include_depth", False)
+
+    with camera_lock:
+        rgb_msg   = latest_rgb
+        depth_msg = latest_depth if include_depth else None
+
+    if rgb_msg is None:
+        return web.json_response(
+            {"code": 3001, "msg": "INTERNAL_FAILED", "data": {"detail": "no rgb frame available"}},
+            status=500,
+        )
+    if include_depth and depth_msg is None:
+        return web.json_response(
+            {"code": 3001, "msg": "INTERNAL_FAILED", "data": {"detail": "no depth frame available"}},
+            status=500,
+        )
+
+    now = datetime.now()
+    image_id = f"img_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
+    rgb_path = os.path.join(CAPTURE_DIR, f"{image_id}_rgb.jpg")
+
+    try:
+        cv_rgb = bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
+        cv2.imwrite(rgb_path, cv_rgb)
+    except Exception as e:
+        return web.json_response(
+            {"code": 3001, "msg": "INTERNAL_FAILED", "data": {"detail": str(e)}},
+            status=500,
+        )
+
+    depth_path = None
+    if include_depth:
+        depth_path = os.path.join(CAPTURE_DIR, f"{image_id}_depth.png")
+        try:
+            cv_depth = bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
+            cv2.imwrite(depth_path, cv_depth)
+        except Exception as e:
+            os.remove(rgb_path)
+            return web.json_response(
+                {"code": 3001, "msg": "INTERNAL_FAILED", "data": {"detail": str(e)}},
+                status=500,
+            )
+
+    created_at  = now.isoformat()
+    expires_at  = (now + timedelta(seconds=CAPTURE_TTL)).isoformat()
+
+    with image_store_lock:
+        image_store[image_id] = {
+            "created_at": created_at,
+            "rgb_path":   rgb_path,
+            "has_depth":  include_depth,
+            "depth_path": depth_path,
+        }
+        _cleanup_by_count()
+
+    print(f"[CAM] 抓拍: {image_id}")
+    return web.json_response({
+        "code": 0,
+        "msg": "ok",
+        "data": {
+            "image_id":    image_id,
+            "created_at":  created_at,
+            "expires_at":  expires_at,
+            "has_depth":   include_depth,
+            "rgb": {
+                "content_type": "image/jpeg",
+                "download_url": f"/api/v1/camera/images/{image_id}/rgb",
+            },
+            "depth": {
+                "content_type": "image/png",
+                "download_url": f"/api/v1/camera/images/{image_id}/depth",
+            } if include_depth else None,
+        },
+    })
+
+
+async def handle_image_meta(request):
+    image_id = request.match_info["image_id"]
+    with image_store_lock:
+        meta = image_store.get(image_id)
+
+    if meta is None:
+        return web.json_response(
+            {"code": 4004, "msg": "IMAGE_NOT_FOUND", "data": {"image_id": image_id}},
+            status=404,
+        )
+
+    created_at = meta["created_at"]
+    expires_at = (datetime.fromisoformat(created_at) + timedelta(seconds=CAPTURE_TTL)).isoformat()
+
+    return web.json_response({
+        "code": 0,
+        "msg": "ok",
+        "data": {
+            "image_id":   image_id,
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "has_depth":  meta["has_depth"],
+            "rgb":   {"download_url": f"/api/v1/camera/images/{image_id}/rgb"},
+            "depth": {"download_url": f"/api/v1/camera/images/{image_id}/depth"} if meta["has_depth"] else None,
+        },
+    })
+
+
+async def handle_image_rgb(request):
+    image_id = request.match_info["image_id"]
+    with image_store_lock:
+        meta = image_store.get(image_id)
+
+    if meta is None or not os.path.exists(meta["rgb_path"]):
+        return web.json_response(
+            {"code": 4004, "msg": "IMAGE_NOT_FOUND", "data": {"image_id": image_id}},
+            status=404,
+        )
+    return web.FileResponse(meta["rgb_path"], headers={"Content-Type": "image/jpeg"})
+
+
+async def handle_image_depth(request):
+    image_id = request.match_info["image_id"]
+    with image_store_lock:
+        meta = image_store.get(image_id)
+
+    if meta is None or not meta["has_depth"] or not os.path.exists(meta["depth_path"]):
+        return web.json_response(
+            {"code": 4004, "msg": "IMAGE_NOT_FOUND", "data": {"image_id": image_id}},
+            status=404,
+        )
+    return web.FileResponse(meta["depth_path"], headers={"Content-Type": "image/png"})
+
+
+async def handle_image_delete(request):
+    image_id = request.match_info["image_id"]
+    with image_store_lock:
+        exists = image_id in image_store
+        if exists:
+            _delete_image(image_id)
+
+    print(f"[CAM] 删除: {image_id}")
+    return web.json_response({"code": 0, "msg": "deleted", "data": {"image_id": image_id}})
+
+
+# ---------------------------------------------------------------------------
 # WebSocket 处理器
 # ---------------------------------------------------------------------------
 
@@ -419,13 +653,18 @@ async def main_async():
     app.router.add_post("/api/v1/stop",          handle_stop)
     app.router.add_post("/api/v1/navigate",      handle_navigate)
     app.router.add_get("/api/v1/status",         handle_status)
-    app.router.add_get("/api/v1/points",         handle_points)
+    app.router.add_get("/api/v1/points",                            handle_points)
+    app.router.add_post("/api/v1/camera/capture",                  handle_capture)
+    app.router.add_get("/api/v1/camera/images/{image_id}",         handle_image_meta)
+    app.router.add_get("/api/v1/camera/images/{image_id}/rgb",     handle_image_rgb)
+    app.router.add_get("/api/v1/camera/images/{image_id}/depth",   handle_image_depth)
+    app.router.add_delete("/api/v1/camera/images/{image_id}",      handle_image_delete)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
-    print("[HTTP] 监听 :8080  (move / stop / navigate / status / points)")
+    print("[HTTP] 监听 :8080  (move / stop / navigate / status / points / camera)")
 
     async with websockets.serve(ws_handler, "0.0.0.0", 8081):
         print("[WS]   监听 :8081")
@@ -437,13 +676,18 @@ async def main_async():
 # ---------------------------------------------------------------------------
 
 def main():
-    global navigator, cmd_vel_pub, poi_map
+    global navigator, cmd_vel_pub, poi_map, camera_node
+
+    os.makedirs(CAPTURE_DIR, exist_ok=True)
+    print(f"[CAM] 图片目录: {CAPTURE_DIR}")
+
 
     poi_map = load_poi_map()
     print(f"[POI] 加载点位: {list(poi_map.keys())}")
 
     rclpy.init()
     navigator = BasicNavigator()
+
 
     cmd_vel_pub = navigator.create_publisher(Twist, "/cmd_vel", 10)
 
@@ -467,6 +711,10 @@ def main():
 
     navigator.waitUntilNav2Active()
     print("[INIT] Nav2 已激活，等待 AMCL 定位...")
+    camera_node = CameraNode()
+    threading.Thread(target=rclpy.spin, args=(camera_node,), daemon=True).start()
+    print("[CAM] 相机订阅节点启动")
+    threading.Thread(target=_cleanup_loop, daemon=True).start()
     time.sleep(2)
     print("[INIT] 初始化完成，启动服务器")
 
