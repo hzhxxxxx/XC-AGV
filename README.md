@@ -100,6 +100,7 @@ sudo systemctl daemon-reload && sudo systemctl enable can0.service && sudo syste
 sudo bash -c 'echo "KERNEL==\"ttyUSB*\", ATTRS{idVendor}==\"10c4\", ATTRS{idProduct}==\"ea60\", MODE:=\"0777\", SYMLINK+=\"imu_usb\"" > /etc/udev/rules.d/imu_usb.rules'
 sudo udevadm control --reload-rules && sudo udevadm trigger
 # 拔插 IMU USB 使规则生效
+```
 
 **雷达 udev 规则（固定串口别名）：**
 
@@ -111,7 +112,7 @@ M10 规则（`/etc/udev/rules.d/lslidar_m10.rules`）：
 sudo bash -c 'echo "KERNEL==\"ttyACM*\", ATTRS{idVendor}==\"1a86\", ATTRS{idProduct}==\"55d4\", ATTRS{serial}==\"5A6D014086\", SYMLINK+=\"lslidar_m10\", MODE:=\"0666\"" > /etc/udev/rules.d/lslidar_m10.rules'
 ```
 
-MS200 规则（`/etc/udev/rules.d/ms200.rules`）：
+**MS200 规则（`/etc/udev/rules.d/ms200.rules`）：**
 
 ```bash
 sudo bash -c 'echo "KERNEL==\"ttyACM*\", ATTRS{idVendor}==\"1a86\", ATTRS{idProduct}==\"55d4\", ATTRS{serial}==\"597D000635\", SYMLINK+=\"lslidar_ms200\", MODE:=\"0666\"" > /etc/udev/rules.d/ms200.rules'
