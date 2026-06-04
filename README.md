@@ -100,7 +100,30 @@ sudo systemctl daemon-reload && sudo systemctl enable can0.service && sudo syste
 sudo bash -c 'echo "KERNEL==\"ttyUSB*\", ATTRS{idVendor}==\"10c4\", ATTRS{idProduct}==\"ea60\", MODE:=\"0777\", SYMLINK+=\"imu_usb\"" > /etc/udev/rules.d/imu_usb.rules'
 sudo udevadm control --reload-rules && sudo udevadm trigger
 # 拔插 IMU USB 使规则生效
+
+**雷达 udev 规则（固定串口别名）：**
+
+两个雷达 USB 芯片相同（1a86:55d4），必须通过序列号区分，否则插入顺序变化会导致串口编号漂移。
+
+M10 规则（`/etc/udev/rules.d/lslidar_m10.rules`）：
+
+```bash
+sudo bash -c 'echo "KERNEL==\"ttyACM*\", ATTRS{idVendor}==\"1a86\", ATTRS{idProduct}==\"55d4\", ATTRS{serial}==\"5A6D014086\", SYMLINK+=\"lslidar_m10\", MODE:=\"0666\"" > /etc/udev/rules.d/lslidar_m10.rules'
 ```
+
+MS200 规则（`/etc/udev/rules.d/ms200.rules`）：
+
+```bash
+sudo bash -c 'echo "KERNEL==\"ttyACM*\", ATTRS{idVendor}==\"1a86\", ATTRS{idProduct}==\"55d4\", ATTRS{serial}==\"597D000635\", SYMLINK+=\"lslidar_ms200\", MODE:=\"0666\"" > /etc/udev/rules.d/ms200.rules'
+```
+
+重载规则并拔插两个雷达 USB 使别名生效：
+
+```bash
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+效果：`/dev/lslidar_m10`、`/dev/lslidar_ms200` 固定绑定对应雷达，与插入顺序无关。
 
 **复制地图文件：**
 
