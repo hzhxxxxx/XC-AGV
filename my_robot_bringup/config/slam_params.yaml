@@ -54,17 +54,17 @@ slam_toolbox:
     link_scan_maximum_distance: 4.0  # 从1.5扩大到4.0米，关键！
     # ===== 修改7: 扩大闭环搜索距离（应对漂移） =====
     loop_search_maximum_distance: 8.0  # 从3.0扩大到8.0米，关键！
-    do_loop_closing: false  # 半边雷达禁用闭环，避免错误闭环导致地图旋转
+    do_loop_closing: true   # 360°雷达，开启闭环
     loop_match_minimum_chain_size: 10
-    loop_match_maximum_variance_coarse: 3.0
-    loop_match_minimum_response_coarse: 0.35
+    loop_match_maximum_variance_coarse: 1.5
+    loop_match_minimum_response_coarse: 0.45
     # ===== 修改8: 降低闭环匹配阈值 =====
-    loop_match_minimum_response_fine: 0.4  # 从0.45降低到0.4
+    loop_match_minimum_response_fine: 0.60
 
     # Correlation Parameters - Correlation Parameters
     correlation_search_space_dimension: 0.5
     correlation_search_space_resolution: 0.01
-    correlation_search_space_smear_deviation: 0.1
+    correlation_search_space_smear_deviation: 0.05
 
     # Correlation Parameters - Loop Closure Parameters
     loop_search_space_dimension: 8.0
@@ -73,7 +73,7 @@ slam_toolbox:
 
     # Scan Matcher Parameters
     distance_variance_penalty: 0.5
-    angle_variance_penalty: 1.0
+    angle_variance_penalty: 1.2
 
     fine_search_angle_offset: 0.00349
     coarse_search_angle_offset: 0.349

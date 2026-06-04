@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="xiaoche">
-    <!-- 引入底盘结构（已包含激光雷达） -->
-    <xacro:include filename="$(find my_robot_description)/urdf/xiaoche_shiyan_control.urdf.xacro"/>
+  <!-- Robot structure exported from the latest URDF data. -->
+  <xacro:include filename="$(find my_robot_description)/urdf/xiaoche_shiyan_control.urdf.xacro"/>
 
-    <!-- 引入ros2_control配置 -->
-    <xacro:include filename="$(find my_robot_description)/urdf/xiaoche_hardware.ros2_control.xacro"/>
+  <!-- ros2_control hardware/controller interfaces for the mobile base. -->
+  <xacro:include filename="$(find my_robot_description)/urdf/xiaoche_hardware.ros2_control.xacro"/>
 </robot>

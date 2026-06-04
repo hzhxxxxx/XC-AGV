@@ -133,7 +133,13 @@ ros2 run wit_ros2_imu wit_ros2_imu
 ros2 launch my_robot_bringup ekf.launch.py
 
 # 4. 激光雷达
-ros2 launch lslidar_driver lsm10p_uart_launch.py
+-前雷达启动：
+  rdk-x5-1 : `ros2 launch lslidar_driver lsm10p_uart_launch.py`
+  rdk-x5-2 : `ros2 launch lslidar_driver lsm10_uart_launch.py`
+
+-后雷达启动 : `ros2 launch oradar_lidar ms200_scan.launch.py`
+
+-启动双雷达融合 : `ros2 launch ros2_laser_scan_merger merge_2_scan.launch.py`
 
 # 5. Nav2 导航
 ros2 launch nav2_bringup bringup_launch.py \
@@ -141,13 +147,22 @@ ros2 launch nav2_bringup bringup_launch.py \
   map:=/home/sunrise/maps/xc_room1.yaml \
   params_file:=/home/sunrise/ros2_ws/src/my_robot_bringup/config/nav2_params.yaml
 
+# 6. 海康相机启动：
+`ros2 run mv3d_rgbd_ros2 hik_camera_image_pub`
+
 # 6. 上位机通信服务
 cd ~/ros2_ws && source install/setup.bash
+
+-智能小R：
 python3 src/my_robot_bringup/scripts/xc_robot_server.py
 
+-Autonomous:
+python3 src/my_robot_bringup/scripts/robot_claw_server.py
+
 # 可选：SLAM 建图
-ros2 launch slam_toolbox online_async_launch.py \
-  params_file:=$HOME/ros2_ws/install/my_robot_bringup/share/my_robot_bringup/config/slam_params.yaml
+- `ros2 launch nav2_bringup navigation_launch.py use_sim_time:=false`
+- `ros2 launch slam_toolbox online_async_launch.py params_file:=$HOME/ros2_ws/install/my_robot_bringup/share/my_robot_bringup/config/slam_params.yaml`
+- `ros2 run nav2_map_server map_saver_cli -f maps/xc_room2`
 
 # 可选：键盘遥控
 ros2 run teleop_twist_keyboard teleop_twist_keyboard

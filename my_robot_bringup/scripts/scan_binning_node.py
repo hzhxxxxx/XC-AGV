@@ -29,11 +29,11 @@ class ScanBinningNode(Node):
             self.scan_callback,
             10
         )
-        self.publisher = self.create_publisher(LaserScan, 'scan', 10)
+        self.publisher = self.create_publisher(LaserScan, 'scan_m10', 10)
 
         self.get_logger().info(f'Scan Binning Node started with {self.num_bins} bins')
         self.get_logger().info('Subscribing to: scan_raw')
-        self.get_logger().info('Publishing to: scan')
+        self.get_logger().info('Publishing to: scan_m10')
 
     def scan_callback(self, input_scan):
         """
