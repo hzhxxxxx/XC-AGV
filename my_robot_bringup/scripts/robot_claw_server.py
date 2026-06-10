@@ -23,6 +23,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from sensor_msgs.msg import Image
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
+from rclpy.executors import SingleThreadedExecutor
 from cv_bridge import CvBridge
 from aiohttp import web
 import websockets
@@ -365,6 +366,53 @@ async def handle_navigate(request):
     })
 
 
+
+
+async def handle_navigate_pose(request):
+    global robot_state, nav_state, target_point_id, nav_cancelled
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"code": 1002, "msg": "PARSE_ERROR", "data": {"detail": "invalid JSON"}},
+            status=400,
+        )
+
+    x = body.get("x")
+    y = body.get("y")
+    theta = body.get("theta", 0.0)
+
+    if x is None or y is None:
+        return web.json_response(
+            {"code": 1002, "msg": "MISSING_PARAMS", "data": {"detail": "x and y are required"}},
+            status=400,
+        )
+
+    with state_lock:
+        if robot_state == "navigating":
+            return web.json_response(
+                {"code": 2006, "msg": "NAV_IN_PROGRESS", "data": {"current_target": target_point_id}},
+                status=409,
+            )
+        if robot_state == "manual":
+            cancel_watchdog()
+            stop_robot()
+
+        robot_state = "navigating"
+        nav_state = "navigating"
+        target_point_id = "custom"
+        nav_cancelled = False
+
+    point = {"x": float(x), "y": float(y), "theta": float(theta)}
+    executor.submit(do_navigate, "custom", point)
+
+    return web.json_response({
+        "code": 0,
+        "msg": "accepted",
+        "data": {"nav_state": "navigating"},
+    })
+
 # ---------------------------------------------------------------------------
 # 状态查询处理器
 # ---------------------------------------------------------------------------
@@ -652,6 +700,7 @@ async def main_async():
     app.router.add_post("/api/v1/move/right",    handle_move_right)
     app.router.add_post("/api/v1/stop",          handle_stop)
     app.router.add_post("/api/v1/navigate",      handle_navigate)
+    app.router.add_post("/api/v1/navigate/pose",  handle_navigate_pose)
     app.router.add_get("/api/v1/status",         handle_status)
     app.router.add_get("/api/v1/points",                            handle_points)
     app.router.add_post("/api/v1/camera/capture",                  handle_capture)
@@ -712,7 +761,9 @@ def main():
     navigator.waitUntilNav2Active()
     print("[INIT] Nav2 已激活，等待 AMCL 定位...")
     camera_node = CameraNode()
-    threading.Thread(target=rclpy.spin, args=(camera_node,), daemon=True).start()
+    cam_executor = SingleThreadedExecutor()
+    cam_executor.add_node(camera_node)
+    threading.Thread(target=cam_executor.spin, daemon=True).start()
     print("[CAM] 相机订阅节点启动")
     threading.Thread(target=_cleanup_loop, daemon=True).start()
     time.sleep(2)

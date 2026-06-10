@@ -186,6 +186,7 @@ python3 src/my_robot_bringup/scripts/robot_claw_server.py
 # 可选：SLAM 建图
 - `ros2 launch nav2_bringup navigation_launch.py use_sim_time:=false`
 - `ros2 launch slam_toolbox online_async_launch.py params_file:=$HOME/ros2_ws/install/my_robot_bringup/share/my_robot_bringup/config/slam_params.yaml`
+- `ros2 launch my_robot_bringup rtabmap.launch.py`
 - `ros2 run nav2_map_server map_saver_cli -f maps/xc_room2`
 
 # 可选：键盘遥控
@@ -198,13 +199,25 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 
 HTTP REST（端口 8080）+ WebSocket 推送（端口 8081）。
 
-### 导航到目标点
+### 导航到目标点（按点位 ID）
 
 ```bash
 curl -X POST http://<X5_IP>:8080/api/v1/navigate \
   -H "Content-Type: application/json" \
-  -d '{"point_id": "work"}'
+  -d '{"point_id": "point_1"}'
 ```
+
+可用点位：`home` / `point_1` ~ `point_7`，详见 `my_robot_bringup/config/poi_map.json`。
+
+### 导航到坐标（直接传 x/y/theta）
+
+```bash
+curl -X POST http://<X5_IP>:8080/api/v1/navigate/pose \
+  -H "Content-Type: application/json" \
+  -d '{"x": 0.88, "y": -0.51, "theta": -1.59}'
+```
+
+`theta` 可省略，默认 `0.0`。无需预先配置点位。
 
 ### 立即停车
 
