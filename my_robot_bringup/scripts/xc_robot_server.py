@@ -13,12 +13,21 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import rclpy
+import rclpy.node
+from rclpy.executors import SingleThreadedExecutor
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from nav_msgs.msg import Odometry
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from aiohttp import web
 import websockets
+
+# ---------------------------------------------------------------------------
+# 速度档位配置
+# ---------------------------------------------------------------------------
+
+SPEED_LINEAR = {"slow": 0.1, "normal": 0.2, "fast": 0.3}
 
 # ---------------------------------------------------------------------------
 # 全局状态
@@ -40,6 +49,26 @@ navigator = None
 executor = ThreadPoolExecutor(max_workers=1)
 
 poi_map = {}
+
+# robot_state: idle | manual | navigating
+robot_state = "idle"
+
+cmd_vel_pub = None
+
+# amount 定时器
+amount_timer = None
+amount_timer_lock = threading.Lock()
+
+# 开环旋转控制（梯形加减速曲线 + 误差重试）
+ROTATE_MAX_SPEED = 0.4        # 最大转速，rad/s
+ROTATE_ACCEL = 1.0            # 角加速度，rad/s^2
+ROTATE_CALIBRATION = 1.0        # 第一次转动的标定系数
+ROTATE_RETRY_CALIBRATION = 0.6  # 第二次及以后修正转动的标定系数（小角度更容易过冲，调保守）
+ROTATE_PERIOD = 0.05          # 速度曲线更新周期，秒
+ROTATE_TOLERANCE = math.radians(2)  # 到位容差，超出则重试补齐
+ROTATE_MAX_RETRIES = 3        # 最多重试次数
+ROTATE_SETTLE_TIME = 0.3      # 转完等待位姿稳定的时间，秒
+_rotate_stop_event = threading.Event()
 
 # ---------------------------------------------------------------------------
 # 工具函数
@@ -65,6 +94,113 @@ def create_pose(x, y, theta):
     pose.pose.orientation.z = math.sin(float(theta) / 2)
     pose.pose.orientation.w = math.cos(float(theta) / 2)
     return pose
+
+
+def publish_twist(linear_x: float, angular_z: float):
+    msg = Twist()
+    msg.linear.x = linear_x
+    msg.angular.z = angular_z
+    cmd_vel_pub.publish(msg)
+
+
+def stop_robot():
+    publish_twist(0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Amount 控制
+# ---------------------------------------------------------------------------
+
+def _amount_timeout():
+    global robot_state
+    print("[AMOUNT] 运动量到位，自动停车")
+    stop_robot()
+    with state_lock:
+        if robot_state == "manual":
+            robot_state = "idle"
+
+
+def cancel_amount_timer():
+    global amount_timer
+    _rotate_stop_event.set()
+    with amount_timer_lock:
+        if amount_timer is not None:
+            amount_timer.cancel()
+            amount_timer = None
+
+
+def _run_rotate_profile(delta: float, calibration: float):
+    """执行一次开环梯形加减速旋转，转过给定的 delta（弧度，带符号）"""
+    distance = abs(delta) * calibration
+    direction = 1.0 if delta > 0 else -1.0
+
+    if distance < 1e-4:
+        return
+
+    v_max = ROTATE_MAX_SPEED
+    a = ROTATE_ACCEL
+    d_ramp = v_max * v_max / a  # 加速+减速两段共需要走过的角度
+
+    if distance >= d_ramp:
+        t_acc = v_max / a
+        t_cruise = (distance - d_ramp) / v_max
+    else:
+        v_max = math.sqrt(distance * a)  # 距离不够加速到最大速度，退化为三角形曲线
+        t_acc = v_max / a
+        t_cruise = 0.0
+
+    t_total = 2 * t_acc + t_cruise
+    print(f"[ROTATE]   执行 delta={math.degrees(delta):.1f}° v_max={v_max:.2f}rad/s t_total={t_total:.2f}s")
+
+    start = time.monotonic()
+    while not _rotate_stop_event.is_set():
+        t = time.monotonic() - start
+        if t >= t_total:
+            break
+
+        if t < t_acc:
+            v = a * t
+        elif t < t_acc + t_cruise:
+            v = v_max
+        else:
+            v = v_max - a * (t - t_acc - t_cruise)
+
+        publish_twist(0.0, direction * v)
+        time.sleep(ROTATE_PERIOD)
+
+    stop_robot()
+
+
+def _do_rotate(target_yaw: float):
+    """开环旋转 + 误差重试：每次转完读角度校验，不够再补一次"""
+    global robot_state
+    _rotate_stop_event.clear()
+    try:
+        for attempt in range(1, ROTATE_MAX_RETRIES + 1):
+            if _rotate_stop_event.is_set():
+                break
+
+            with state_lock:
+                current_yaw = current_pose["theta"]
+
+            delta = (target_yaw - current_yaw + math.pi) % (2 * math.pi) - math.pi
+
+            if abs(delta) < ROTATE_TOLERANCE:
+                print(f"[ROTATE] 到位 target={target_yaw:.2f} current={current_yaw:.2f} attempt={attempt}")
+                break
+
+            calibration = ROTATE_CALIBRATION if attempt == 1 else ROTATE_RETRY_CALIBRATION
+            print(f"[ROTATE] 第{attempt}次 target={target_yaw:.2f} current={current_yaw:.2f} delta={math.degrees(delta):.1f}° calib={calibration}")
+            _run_rotate_profile(delta, calibration)
+            time.sleep(ROTATE_SETTLE_TIME)
+        else:
+            print(f"[ROTATE] 达到最大重试次数（{ROTATE_MAX_RETRIES}），未完全到位")
+    finally:
+        stop_robot()
+        with state_lock:
+            if robot_state == "manual":
+                robot_state = "idle"
+        print("[ROTATE] 旋转结束")
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +235,7 @@ def push_nav_status(state: str, nid: str, point_id: str):
 # ---------------------------------------------------------------------------
 
 def do_navigate(point_id: str, point: dict, nid: str):
-    global nav_state, nav_id, target_point_id, failed_point_id, nav_cancelled
+    global nav_state, nav_id, target_point_id, failed_point_id, nav_cancelled, robot_state
 
     pose = create_pose(point["x"], point["y"], point["theta"])
     navigator.goToPose(pose)
@@ -123,6 +259,7 @@ def do_navigate(point_id: str, point: dict, nid: str):
     with state_lock:
         if nav_cancelled:
             nav_cancelled = False
+            robot_state = "idle"
             return
 
     result = navigator.getResult()
@@ -133,9 +270,11 @@ def do_navigate(point_id: str, point: dict, nid: str):
         if result == TaskResult.SUCCEEDED:
             nav_state = "arrived"
             failed_point_id = None
+            robot_state = "idle"
         else:
             nav_state = "failed"
             failed_point_id = point_id
+            robot_state = "failed"
 
     new_state = "arrived" if result == TaskResult.SUCCEEDED else "failed"
     print(f"[NAV] {point_id} -> {new_state}")
@@ -148,11 +287,87 @@ def do_navigate(point_id: str, point: dict, nid: str):
 
 
 # ---------------------------------------------------------------------------
+# 手动控制处理器
+# ---------------------------------------------------------------------------
+
+async def handle_move(request, direction: str):
+    global robot_state
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"code": 1002, "msg": "PARSE_ERROR", "data": {"detail": "invalid JSON"}},
+            status=400,
+        )
+
+    amount = body.get("amount")
+    if amount is None:
+        return web.json_response(
+            {"code": 1002, "msg": "MISSING_AMOUNT", "data": {"detail": "amount is required"}},
+            status=400,
+        )
+
+    with state_lock:
+        if robot_state == "navigating":
+            return web.json_response(
+                {"code": 2006, "msg": "NAV_IN_PROGRESS", "data": {"current_target": target_point_id}},
+                status=409,
+            )
+        robot_state = "manual"
+
+    amount = float(amount)
+    cancel_amount_timer()
+
+    if direction in ("forward", "backward"):
+        speed = SPEED_LINEAR["normal"]
+        duration = amount / speed
+        linear_x = speed if direction == "forward" else -speed
+        print(f"[MOVE] {direction} amount={amount} duration={duration:.2f}s")
+
+        publish_twist(linear_x, 0.0)
+
+        t = threading.Timer(duration, _amount_timeout)
+        with amount_timer_lock:
+            amount_timer = t
+        t.start()
+    else:
+        # amount 为绝对目标角度（度），开环旋转（梯形加减速曲线）
+        target_yaw = math.radians(amount)
+
+        threading.Thread(target=_do_rotate, args=(target_yaw,), daemon=True).start()
+
+    msg_map = {
+        "forward": "moving_forward",
+        "backward": "moving_backward",
+        "rotate": "rotating",
+    }
+
+    return web.json_response({
+        "code": 0,
+        "msg": msg_map[direction],
+        "data": {"robot_state": "manual", "direction": direction},
+    })
+
+
+async def handle_move_forward(request):
+    return await handle_move(request, "forward")
+
+
+async def handle_move_backward(request):
+    return await handle_move(request, "backward")
+
+
+async def handle_move_rotate(request):
+    return await handle_move(request, "rotate")
+
+
+# ---------------------------------------------------------------------------
 # HTTP 处理器
 # ---------------------------------------------------------------------------
 
 async def handle_navigate(request):
-    global nav_state, nav_id, target_point_id, nav_cancelled
+    global nav_state, nav_id, target_point_id, nav_cancelled, robot_state
 
     try:
         body = await request.json()
@@ -170,13 +385,19 @@ async def handle_navigate(request):
         )
 
     with state_lock:
-        if nav_state == "navigating":
+        if robot_state == "navigating":
             return web.json_response(
                 {"code": 2006, "msg": "NAV_IN_PROGRESS", "data": {"current_target": target_point_id}},
                 status=409,
             )
+        # 手动控制中先停车再切换导航
+        if robot_state == "manual":
+            cancel_amount_timer()
+            stop_robot()
+
         nid = f"NAV-{uuid.uuid4().hex[:6].upper()}"
         nav_state = "navigating"
+        robot_state = "navigating"
         nav_id = nid
         target_point_id = point_id
         nav_cancelled = False
@@ -195,21 +416,24 @@ async def handle_navigate(request):
 
 
 async def handle_stop(request):
-    global nav_state, nav_id, target_point_id, nav_cancelled
+    global nav_state, nav_id, target_point_id, nav_cancelled, robot_state
+
+    cancel_amount_timer()
+    stop_robot()
 
     with state_lock:
-        if nav_state != "navigating":
-            return web.json_response({"code": 0, "msg": "stopped"})
-        nid = nav_id
-        point_id = target_point_id
-        nav_state = "idle"
-        nav_id = None
-        target_point_id = None
-        nav_cancelled = True
+        if nav_state == "navigating":
+            nid = nav_id
+            point_id = target_point_id
+            nav_state = "idle"
+            nav_id = None
+            target_point_id = None
+            nav_cancelled = True
+            cancel_event.set()
+            push_nav_status("idle", nid, point_id)
+            print(f"[STOP] 导航已取消: {point_id}")
 
-    cancel_event.set()
-    push_nav_status("idle", nid, point_id)
-    print(f"[STOP] 导航已取消: {point_id}")
+        robot_state = "idle"
 
     return web.json_response({"code": 0, "msg": "stopped"})
 
@@ -217,8 +441,10 @@ async def handle_stop(request):
 async def handle_status(request):
     with state_lock:
         state = nav_state
+        r_state = robot_state
         t_point = target_point_id
         f_point = failed_point_id
+        pose = dict(current_pose)
 
     nav_info = {"state": state}
     if state == "navigating":
@@ -232,7 +458,8 @@ async def handle_status(request):
         "code": 0,
         "msg": "ok",
         "data": {
-            "pose": dict(current_pose),
+            "robot_state": r_state,
+            "pose": pose,
             "nav": nav_info,
             "battery": {"level": 100, "is_charging": False},
             "errors": [],
@@ -264,15 +491,18 @@ async def main_async():
     asyncio_loop = asyncio.get_event_loop()
 
     app = web.Application()
-    app.router.add_post("/api/v1/navigate", handle_navigate)
-    app.router.add_post("/api/v1/stop", handle_stop)
-    app.router.add_get("/api/v1/status", handle_status)
+    app.router.add_post("/api/v1/move/forward",  handle_move_forward)
+    app.router.add_post("/api/v1/move/backward", handle_move_backward)
+    app.router.add_post("/api/v1/move/rotate",   handle_move_rotate)
+    app.router.add_post("/api/v1/stop",          handle_stop)
+    app.router.add_post("/api/v1/navigate",      handle_navigate)
+    app.router.add_get("/api/v1/status",         handle_status)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
-    print("[HTTP] 监听 :8080  (navigate / stop / status)")
+    print("[HTTP] 监听 :8080  (forward / backward / rotate / stop / navigate / status)")
 
     async with websockets.serve(ws_handler, "0.0.0.0", 8081):
         print("[WS]   监听 :8081")
@@ -283,14 +513,49 @@ async def main_async():
 # 入口
 # ---------------------------------------------------------------------------
 
+def _amcl_pose_cb(msg):
+    global current_pose
+    p = msg.pose.pose.position
+    q = msg.pose.pose.orientation
+    siny = 2 * (q.w * q.z + q.x * q.y)
+    cosy = 1 - 2 * (q.y * q.y + q.z * q.z)
+    with state_lock:
+        current_pose["x"] = round(p.x, 3)
+        current_pose["y"] = round(p.y, 3)
+        current_pose["theta"] = round(math.atan2(siny, cosy), 4)
+
+
+def _odom_cb(msg):
+    """高频里程计回调，用于精确旋转控制"""
+    global current_pose
+    p = msg.pose.pose.position
+    q = msg.pose.pose.orientation
+    siny = 2 * (q.w * q.z + q.x * q.y)
+    cosy = 1 - 2 * (q.y * q.y + q.z * q.z)
+    with state_lock:
+        # 仅更新 theta（odom 的 xy 有漂移，不用）
+        current_pose["theta"] = round(math.atan2(siny, cosy), 4)
+
+
 def main():
-    global navigator, poi_map
+    global navigator, cmd_vel_pub, poi_map
 
     poi_map = load_poi_map()
     print(f"[POI] 加载点位: {list(poi_map.keys())}")
 
     rclpy.init()
     navigator = BasicNavigator()
+    cmd_vel_pub = navigator.create_publisher(Twist, "/cmd_vel", 10)
+
+    amcl_node = rclpy.node.Node("amcl_pose_listener")
+    amcl_node.create_subscription(PoseWithCovarianceStamped, "/amcl_pose", _amcl_pose_cb, 10)
+    odom_node = rclpy.node.Node("odom_listener")
+    odom_node.create_subscription(Odometry, "/odom", _odom_cb, 10)
+    pose_executor = SingleThreadedExecutor()
+    pose_executor.add_node(amcl_node)
+    pose_executor.add_node(odom_node)
+    threading.Thread(target=pose_executor.spin, daemon=True).start()
+    print("[INIT] AMCL + Odom 位姿订阅已启动")
 
     qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
     initial_pose_pub = navigator.create_publisher(

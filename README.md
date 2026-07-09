@@ -7,7 +7,7 @@
 ## 硬件配置
 
 | 组件 | 型号 | 说明 |
-|---|---|---|
+| --- | --- | --- |
 | 主控板 | RDK-X5 (ARM64) | ROS2 Humble |
 | 电机控制器 | ZLAC8015D V4.0 | CAN 总线，CANopen 协议，节点 ID=1 |
 | 激光雷达 | 镭神 M10P / M10（串口） | `/dev/ttyACM0`，460800 波特率 |
@@ -16,7 +16,7 @@
 
 **底盘参数：**
 - 轮间距：0.36 m
-- 轮半径：0.0825 m
+- 轮半径：0.0903 m
 - 编码器校准系数：16957 counts/rev（含减速比）
 - CAN 波特率：500 kHz
 
@@ -44,6 +44,10 @@ sudo apt install -y ros-humble-slam-toolbox
 sudo apt install -y ros-humble-robot-localization
 sudo apt install -y ros-humble-rviz2 ros-humble-xacro ros-humble-teleop-twist-keyboard
 sudo apt install -y libxtensor-dev libxsimd-dev python3-can python3-pynput
+
+# RTAB-Map 建图
+sudo apt install -y ros-humble-rtabmap-ros
+pip install rtabmap-python
 ```
 
 ### 4. 编译工作空间
@@ -137,12 +141,17 @@ mkdir -p ~/maps
 
 ## 启动命令
 
-> ⚠️ **每次开机后，首次启动主程序前必须先运行电机初始化脚本，否则电机无响应。**
+> ⚠️ **每次开机后，建议先完成以下 CAN 通信验证步骤，确认电机控制正常后再启动主程序。**
 
 ```bash
-# 0. 电机初始化（首次启动前执行，按 X 或 ESC 退出）
-python3 ~/keyboard_can_control/keyboard_can_control_linux.py
+# 0a. 激活 CAN 接口（如已配置 can0.service 开机自启则跳过）
+sudo ip link set can0 down && sudo ip link set can0 up type can bitrate 500000
+
+# 0b. 手动电机测试（推荐）：验证 CAN 通信及电机响应是否正常
+#     运行后可用键盘前后左右控制电机，按 X 或 ESC 退出
+python3 /home/sunrise/keyboard_can_control/keyboard_can_control_linux.py
 ```
+此步骤非必须，但建议执行以排除 CAN 总线通信异常，避免后续启动后电机无响应。
 
 按顺序在各终端启动：
 
@@ -171,7 +180,7 @@ ros2 launch nav2_bringup bringup_launch.py \
   map:=/home/sunrise/maps/xc_room1.yaml \
   params_file:=/home/sunrise/ros2_ws/src/my_robot_bringup/config/nav2_params.yaml
 
-# 6. 海康相机启动：
+# 6. 海康相机启动（可选）：
 `ros2 run mv3d_rgbd_ros2 hik_camera_image_pub`
 
 # 6. 上位机通信服务
@@ -180,13 +189,12 @@ cd ~/ros2_ws && source install/setup.bash
 -智能小R：
 python3 src/my_robot_bringup/scripts/xc_robot_server.py
 
--Autonomous:
+-Autonomous：
 python3 src/my_robot_bringup/scripts/robot_claw_server.py
 
 # 可选：SLAM 建图
-- `ros2 launch nav2_bringup navigation_launch.py use_sim_time:=false`
-- `ros2 launch slam_toolbox online_async_launch.py params_file:=$HOME/ros2_ws/install/my_robot_bringup/share/my_robot_bringup/config/slam_params.yaml`
 - `ros2 launch my_robot_bringup rtabmap.launch.py`
+- `ros2 launch slam_toolbox online_async_launch.py params_file:=$HOME/ros2_ws/install/my_robot_bringup/share/my_robot_bringup/config/slam_params.yaml`
 - `ros2 run nav2_map_server map_saver_cli -f maps/xc_room2`
 
 # 可选：键盘遥控
@@ -197,59 +205,114 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 
 ## 上位机通信 API
 
-HTTP REST（端口 8080）+ WebSocket 推送（端口 8081）。
+系统提供两套 HTTP REST（端口 8080）+ WebSocket 推送（端口 8081）的上位机通信程序：
 
-### 导航到目标点（按点位 ID）
+| 程序 | 文件 | 适用场景 |
+| --- | --- | --- |
+| **Autonomous Robot** | `robot_claw_server.py` | 通用底盘控制，支持持续手动控制、相机抓拍 |
+| **智能小R** | `xc_robot_server.py` | 简易运动模式，支持指定米数/角度一次性运动 |
+
+### 通用命令
+
+以下接口在两个 server 中均可用（以 `10.10.91.86` 为例）：
 
 ```bash
-curl -X POST http://<X5_IP>:8080/api/v1/navigate \
+# 导航到点位
+curl -s -X POST http://10.10.91.86:8080/api/v1/navigate \
   -H "Content-Type: application/json" \
-  -d '{"point_id": "point_1"}'
-```
+  -d '{"point_id": "home"}' | python3 -m json.tool
 
-可用点位：`home` / `point_1` ~ `point_7`，详见 `my_robot_bringup/config/poi_map.json`。
-
-### 导航到坐标（直接传 x/y/theta）
-
-```bash
-curl -X POST http://<X5_IP>:8080/api/v1/navigate/pose \
+# 立即停车
+curl -s -X POST http://10.10.91.86:8080/api/v1/stop \
   -H "Content-Type: application/json" \
-  -d '{"x": 0.88, "y": -0.51, "theta": -1.59}'
+  -d '{"reason": "user_command"}' | python3 -m json.tool
+
+# 查询状态
+curl -s http://10.10.91.86:8080/api/v1/status | python3 -m json.tool
+
+# WebSocket 推送
+# 连接地址：ws://<robot-ip>:8081/ws，导航状态变化时自动推送
 ```
 
-`theta` 可省略，默认 `0.0`。无需预先配置点位。
+### 手动控制（Autonomous Robot）
 
-### 立即停车
+持续运动模式，需周期性发送保持运动，内置 2 秒 Watchdog 超时自动停车。
 
 ```bash
-curl -X POST http://<X5_IP>:8080/api/v1/stop \
+# 持续前进（speed_level: slow / normal / fast）
+curl -s -X POST http://10.10.92.174:8080/api/v1/move/forward \
   -H "Content-Type: application/json" \
-  -d '{"reason": "user_command"}'
+  -d '{"speed_level": "normal"}' | python3 -m json.tool
+
+# 持续后退 / 左转 / 右转（用法同上，端点分别为 backward / left / right）
+
+# 导航到坐标（无需预设点位）
+curl -s -X POST http://10.10.92.174:8080/api/v1/navigate/pose \
+  -H "Content-Type: application/json" \
+  -d '{"x": 0.88, "y": -0.51, "theta": -1.59}' | python3 -m json.tool
+
+# 查询点位列表
+curl -s http://10.10.92.174:8080/api/v1/points | python3 -m json.tool
 ```
 
-### 查询状态
+> **Watchdog 说明**：每次收到 `/move/*` 指令后 2 秒未收到新指令则自动停车。上层应以 200~500ms 间隔连续发送指令维持运动。
+
+### 手动控制（智能小 R）
+
+一次性运动模式，指定米数/角度后自动到位停车。
 
 ```bash
-curl http://<X5_IP>:8080/api/v1/status
+# 前进指定米数
+curl -s -X POST http://10.10.91.86:8080/api/v1/move/forward \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 0.3}' | python3 -m json.tool
+
+# 后退指定米数
+curl -s -X POST http://10.10.91.86:8080/api/v1/move/backward \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 0.3}' | python3 -m json.tool
+
+# 旋转到绝对角度（度）
+curl -s -X POST http://10.10.91.86:8080/api/v1/move/rotate \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 90}' | python3 -m json.tool
 ```
 
-`nav.state` 取值：`idle` / `navigating` / `arrived` / `failed`
+### 相机 API（仅 Autonomous Robot，需先启动相机节点）
 
-### WebSocket 推送
+```bash
+# 抓拍
+curl -s -X POST http://10.10.91.86:8080/api/v1/camera/capture | python3 -m json.tool
 
-连接地址：`ws://<X5_IP>:8081/ws`，状态变化时自动推送。
+# 抓拍（含深度图）
+curl -s -X POST http://10.10.91.86:8080/api/v1/camera/capture \
+  -H "Content-Type: application/json" \
+  -d '{"include_depth": true}' | python3 -m json.tool
+
+# 下载图片（image_id 从抓拍返回中获取）
+curl -o rgb.jpg http://10.10.91.86:8080/api/v1/camera/images/<image_id>/rgb
+curl -o depth.png http://10.10.91.86:8080/api/v1/camera/images/<image_id>/depth
+```
 
 ### 点位配置
 
 编辑 `my_robot_bringup/config/poi_map.json`，无需改代码。
 
+可用点位及坐标详见 `poi_map.json`，支持 `home` / `point_1` ~ `point_7`。
+
 ---
 
-## 遥控访问
+## VNC 远程
 
-| 方式 | 地址 | 密码 |
-|---|---|---|
-| noVNC（浏览器） | `http://<X5_IP>:6080/vnc.html` | `sunrise` |
+1. SSH 连上目标机器后，重启 noVNC 服务：
+
+```bash
+sudo systemctl restart novnc
+```
+
+1. 浏览器访问：
+   - **rdk-x5**：`http://10.10.92.174:6080/vnc.html`，密码 `sunrise`
+   - **rdk-x5-2**：`http://10.10.91.86:6080/vnc.html`，密码 `sunrise`
 
 ---
 
